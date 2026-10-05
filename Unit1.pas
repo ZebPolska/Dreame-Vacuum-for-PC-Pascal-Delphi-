@@ -170,7 +170,7 @@ end;
 
 procedure TForm1.Informacje1Click(Sender: TObject);
 begin
-  Application.MessageBox('Opcja niedostępna w wersji Alpha', 'Dreame Unofficial', MB_OK);
+  Application.MessageBox('Opcja niedostępna /w fazie testów/', 'Dreame Unofficial', MB_OK);
   Exit;
   Form7.Show;
 end;
@@ -946,7 +946,7 @@ end;
 
 procedure TForm1.Wiadomocizrobota1Click(Sender: TObject);
 begin
-  Application.MessageBox('Opcja niedostępna w wersji Alpha', 'Dreame Unofficial', MB_OK);
+  Application.MessageBox('Opcja niedostępna /w fazie testów/', 'Dreame Unofficial', MB_OK);
   Exit;
 
   Form8.Show;
@@ -1158,7 +1158,7 @@ end;
 
 procedure TForm1.Powiadomienia1Click(Sender: TObject);
 begin
-  Application.MessageBox('Opcja niedostępna w wersji Alpha', 'Dreame Unofficial', MB_OK);
+  Application.MessageBox('Opcja niedostępna /w fazie testów/', 'Dreame Unofficial', MB_OK);
   Exit;
   Form6.Show;
 end;
