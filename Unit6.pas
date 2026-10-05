@@ -4,8 +4,9 @@ interface
 
 uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes,
-  System.Generics.Collections, System.DateUtils, Vcl.Graphics, Vcl.Controls, Vcl.Forms,
-  Vcl.Dialogs, Vcl.ComCtrls, Vcl.StdCtrls;
+  System.Generics.Collections, System.DateUtils, System.JSON,
+  System.Net.HttpClientComponent,
+  Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.ComCtrls, Vcl.StdCtrls;
 
 type
   TNotificationEntry = class
@@ -29,7 +30,7 @@ type
     FItems: TObjectList<TNotificationEntry>;
     procedure AddNotification(const ATitle, AMessage, ATypeName: string);
     procedure RefreshList;
-    procedure LoadFromRobotState;
+    procedure SyncNotificationsFromCloud;
   public
   end;
 
@@ -61,14 +62,15 @@ begin
   ListView1.Columns.Add.Caption := 'Tytuł';
   ListView1.Columns[1].Width := 180;
   ListView1.Columns.Add.Caption := 'Wiadomość';
-  ListView1.Columns[2].Width := 250;
+  ListView1.Columns[2].Width := 260;
   ListView1.Columns.Add.Caption := 'Czas';
   ListView1.Columns[3].Width := 120;
 end;
 
 procedure TForm6.FormShow(Sender: TObject);
 begin
-  LoadFromRobotState;
+  FItems.Clear;
+  SyncNotificationsFromCloud;
   RefreshList;
 end;
 
@@ -80,27 +82,111 @@ begin
   FItems.Insert(0, Item);
 end;
 
-procedure TForm6.LoadFromRobotState;
+procedure TForm6.SyncNotificationsFromCloud;
 var
+  HTTP: TNetHTTPClient;
+  Response: IHTTPResponse;
+  RequestBody: TStringStream;
+  ResponseJSON, DataObj, PageObj, DeviceObj: TJSONObject;
+  RecordsArr: TJSONArray;
+  I: Integer;
+  VDid: string;
+  StatusCode: Integer;
   StatusText, BatteryText: string;
 begin
-  if not Assigned(Form1) then Exit;
+  if Form1.FKeyToken.IsEmpty or Form1.FSelectedDid.IsEmpty then
+  begin
+    AddNotification('Błąd', 'Brak danych logowania robota', 'Błąd');
+    Exit;
+  end;
 
-  StatusText := Trim(Form1.Panel8.Caption);
-  BatteryText := Trim(Form1.Panel4.Caption);
+  HTTP := TNetHTTPClient.Create(nil);
+  RequestBody := TStringStream.Create('{}', TEncoding.UTF8);
 
-  if StatusText <> '' then
-    AddNotification('Status robota', 'Stan: ' + StatusText, 'Status');
+  try
+    HTTP.CustomHeaders['Content-Type'] := 'application/json';
+    HTTP.CustomHeaders['User-Agent'] := Form1.USER_AGENT;
+    HTTP.CustomHeaders['Authorization'] := Form1.AUTH_HEADER;
+    HTTP.CustomHeaders['Tenant-Id'] := Form1.FTenantId;
+    HTTP.CustomHeaders['Dreame-Auth'] := 'bearer ' + Form1.FKeyToken;
 
-  if BatteryText <> '' then
-    AddNotification('Bateria', 'Poziom: ' + BatteryText, 'Bateria');
+    Response := HTTP.Post(
+      Form1.GetBaseUrl(Form1.Combobox2.Text) + '/dreame-user-iot/iotuserbind/device/listV2',
+      RequestBody
+    );
+
+    if (Response <> nil) and (Response.StatusCode = 200) then
+    begin
+      ResponseJSON := TJSONObject.ParseJSONValue(Response.ContentAsString) as TJSONObject;
+      if Assigned(ResponseJSON) then
+      try
+        if ResponseJSON.GetValue<Integer>('code') = 0 then
+        begin
+          DataObj := ResponseJSON.GetValue('data') as TJSONObject;
+          if Assigned(DataObj) then
+          begin
+            PageObj := DataObj.GetValue('page') as TJSONObject;
+            if Assigned(PageObj) then
+            begin
+              RecordsArr := PageObj.GetValue('records') as TJSONArray;
+              if Assigned(RecordsArr) then
+              begin
+                for I := 0 to RecordsArr.Count - 1 do
+                begin
+                  DeviceObj := RecordsArr.Items[I] as TJSONObject;
+                  VDid := DeviceObj.GetValue<string>('did');
+
+                  if VDid = Form1.FSelectedDid then
+                  begin
+                    StatusCode := DeviceObj.GetValue<Integer>('latestStatus');
+                    case StatusCode of
+                      0: StatusText := 'Nieznany';
+                      1: StatusText := 'Oczekiwanie';
+                      2: StatusText := 'Gotowość';
+                      3: StatusText := 'Bezczynny';
+                      4: StatusText := 'Pauza';
+                      5: StatusText := 'Powrót do bazy';
+                      6: StatusText := 'Ładowanie';
+                      8: StatusText := 'Suszenie mopów';
+                      9: StatusText := 'Mycie mopów';
+                      10: StatusText := 'Mopowanie';
+                      12: StatusText := 'Odkurzanie + mopowanie';
+                      22: StatusText := 'Auto-opróżnianie';
+                    else
+                      StatusText := 'Status ' + StatusCode.ToString;
+                    end;
+
+                    BatteryText := Format('%d%%', [DeviceObj.GetValue<Integer>('battery')]);
+                    AddNotification('Status robota', StatusText, 'Status');
+                    AddNotification('Bateria', BatteryText, 'Bateria');
+
+                    Break;
+                  end;
+                end;
+              end;
+            end;
+          end;
+        end;
+      finally
+        ResponseJSON.Free;
+      end;
+    end
+    else
+    begin
+      AddNotification('Błąd sieci', 'Brak odpowiedzi z serwera Dreame', 'Błąd');
+    end;
+
+  finally
+    RequestBody.Free;
+    HTTP.Free;
+  end;
 end;
 
 procedure TForm6.RefreshList;
 var
   I: Integer;
-  Item: TNotificationEntry;
-  LVItem: TListItem;
+  LEntry: TNotificationEntry;
+  Item: TListItem;
 begin
   ListView1.Items.BeginUpdate;
   try
@@ -108,13 +194,13 @@ begin
 
     for I := 0 to FItems.Count - 1 do
     begin
-      Item := FItems[I];
-      LVItem := ListView1.Items.Add;
-      LVItem.Caption := Item.TypeName;
-      LVItem.SubItems.Add(Item.Title);
-      LVItem.SubItems.Add(Item.Message);
-      LVItem.SubItems.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', Item.Timestamp));
-      LVItem.Data := Item;
+      LEntry := FItems[I];
+      Item := ListView1.Items.Add;
+      Item.Caption := LEntry.TypeName;
+      Item.SubItems.Add(LEntry.Title);
+      Item.SubItems.Add(LEntry.Message);
+      Item.SubItems.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', LEntry.Timestamp));
+      Item.Data := LEntry;
     end;
   finally
     ListView1.Items.EndUpdate;
