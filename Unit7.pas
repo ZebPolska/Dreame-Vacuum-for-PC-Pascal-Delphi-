@@ -4,8 +4,7 @@ interface
 
 uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes,
-  System.Generics.Collections, System.DateUtils, System.JSON,
-  System.Net.HttpClientComponent,
+  System.Generics.Collections, System.DateUtils, System.JSON, System.Net.HttpClientComponent, System.Net.HttpClient,
   Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Vcl.ComCtrls, Vcl.StdCtrls;
 
 type
