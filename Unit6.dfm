@@ -5,7 +5,7 @@ object Form6: TForm6
   BorderStyle = bsSingle
   Caption = 'Powiadomienia'
   ClientHeight = 369
-  ClientWidth = 332
+  ClientWidth = 735
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -5246,11 +5246,13 @@ object Form6: TForm6
     1545A4F15EC3AEC87D2DF4DA10301AB7B4FF1F9445D9E4454018F70000000049
     454E44AE426082}
   Position = poDesktopCenter
+  OnCreate = FormCreate
+  OnShow = FormShow
   TextHeight = 15
   object ListView1: TListView
     Left = 8
     Top = 8
-    Width = 320
+    Width = 719
     Height = 313
     Checkboxes = True
     Columns = <
@@ -5272,7 +5274,7 @@ object Form6: TForm6
     ViewStyle = vsReport
   end
   object Button1: TButton
-    Left = 232
+    Left = 631
     Top = 327
     Width = 96
     Height = 34
@@ -5287,5 +5289,6 @@ object Form6: TForm6
     Height = 34
     Caption = 'Usu'#324' zaznaczone'
     TabOrder = 2
+    OnClick = Button2Click
   end
 end
