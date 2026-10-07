@@ -105,7 +105,7 @@ type
       RobotyLista: array of TRobotDane; // Tutaj zapiszemy wszystkie roboty lista
     const
       SALT_KEY       = 'RAylYC%fmSKp7%Tq';
-      USER_AGENT     = 'Dreamehome/2.1.25 (IPhone; iOS 20.0; Scale/u.00)';
+      USER_AGENT     = 'Dreamehome/2.1.25 (PC; Windows 10; Scale/u.00)';
       AUTH_HEADER    = 'Basic ZHJlYW1lX2FwcHYxOkFQXmR2QHpAU1FZVnhOODg=';
       TENANT_DEFAULT = '000000';
     var
