@@ -1,4 +1,4 @@
-﻿unit Unit1;
+unit Unit1;
 
 interface
 
@@ -170,8 +170,8 @@ end;
 
 procedure TForm1.Informacje1Click(Sender: TObject);
 begin
-  Application.MessageBox('Opcja niedostępna /w fazie testów/', 'Dreame Unofficial', MB_OK);
-  Exit;
+  //Application.MessageBox('Opcja niedostępna w wersji Alpha', 'Dreame Unofficial', MB_OK);
+  //Exit;
   Form7.Show;
 end;
 
@@ -666,8 +666,8 @@ var
   OriginalZone: TZoneData;
   NewZoneCopy: TZoneData;
 begin
-  Application.MessageBox('Opcja niedostępna w wersji Alpha', 'Dreame Unofficial', MB_OK);
-  Exit;
+  Application.MessageBox('Opcja jeszcze nie działa', 'Dreame Unofficial', MB_OK);
+  //Exit;
 
   Form4.ComboBox6.Items.Clear;
   for I := 0 to ComboBox1.Items.Count - 1 do
@@ -946,8 +946,8 @@ end;
 
 procedure TForm1.Wiadomocizrobota1Click(Sender: TObject);
 begin
-  Application.MessageBox('Opcja niedostępna /w fazie testów/', 'Dreame Unofficial', MB_OK);
-  Exit;
+  //Application.MessageBox('Opcja niedostępna w wersji Alpha', 'Dreame Unofficial', MB_OK);
+  //Exit;
 
   Form8.Show;
 end;
@@ -1158,11 +1158,10 @@ end;
 
 procedure TForm1.Powiadomienia1Click(Sender: TObject);
 begin
-  Application.MessageBox('Opcja niedostępna /w fazie testów/', 'Dreame Unofficial', MB_OK);
-  Exit;
+  //Application.MessageBox('Opcja niedostępna w wersji Alpha', 'Dreame Unofficial', MB_OK);
+  //Exit;
   Form6.Show;
 end;
 
 end.
-
 
