@@ -1,4 +1,4 @@
-﻿unit Unit4;
+unit Unit4;
 
 interface
 
@@ -143,8 +143,9 @@ type
     procedure OminWalidacjeSSL(const Sender: TObject;
               const ARequest: TURLRequest; const Certificate: TCertificate; var Accepted: Boolean);
 
-    procedure DecryptDreameAes(ASrcStream, ADestStream: TStream; const AToken: string);
+    procedure DecryptDreameMapAes(ASrcStream, ADestStream: TStream; const AMapKey: string);
     procedure ParseDreameMap(SrcStream: TStream; DestBmp: TBitmap);
+
     procedure DaneRobota;
     procedure DiagnozaStrumieniaAIoT(SrcStream: TStream);
   end;
@@ -239,9 +240,9 @@ begin
   for I := 0 to ComboBox6.Items.Count - 1 do
     if Assigned(ComboBox6.Items.Objects[I]) then
       ComboBox6.Items.Objects[I].Free;
-  FBufferBitmap.Free;
-  FZonesList.Free;
-  FWallsList.Free;
+      FBufferBitmap.Free;
+      FZonesList.Free;
+      FWallsList.Free;
 end;
 
 procedure TForm4.FormShow(Sender: TObject);
@@ -285,205 +286,299 @@ begin
   end;
 end;
 
+function ReadUInt16LE(
+  Stream: TStream;
+  out Value: Word
+): Boolean;
+var
+  B: array[0..1] of Byte;
+begin
+  Result := False;
+
+  if Stream.Position + 2 > Stream.Size then
+    Exit;
+
+  Stream.ReadBuffer(B[0], 2);
+
+  Value :=
+    Word(B[0]) or
+    (Word(B[1]) shl 8);
+
+  Result := True;
+end;
+
+function ReadInt16LE(
+  Stream: TStream;
+  out Value: SmallInt
+): Boolean;
+var
+  W: Word;
+begin
+  Result := ReadUInt16LE(Stream, W);
+
+  if Result then
+    Move(W, Value, SizeOf(Value));
+end;
+
 procedure TForm4.ParseDreameMap(SrcStream: TStream; DestBmp: TBitmap);
 var
-  X, Y, I: Integer;
-  CurrentByte: Byte;
-  GridBuffer: TBytes;
-  GridSizeInPixels: Integer;
+  MapId: Word;
+  FrameId: Word;
+  FrameType: Byte;
 
-  BitSegmentId: Byte;
-  BitIsWall, BitIsFloor: Boolean;
+  RobotX: SmallInt;
+  RobotY: SmallInt;
+  RobotA: SmallInt;
+
+  ChargerX: SmallInt;
+  ChargerY: SmallInt;
+  ChargerA: SmallInt;
+
+  GridSizeMm: Word;
+  MapWidth: Word;
+  MapHeight: Word;
+  MapLeft: SmallInt;
+  MapTop: SmallInt;
+
+  PixelData: TBytes;
+
+  X, Y: Integer;
+  PixelIndex: Integer;
+  Pixel: Byte;
+
+  SegmentId: Integer;
+  IsWall: Boolean;
+  IsFloor: Boolean;
 
   RowPointer: PRGBQuad;
-  RawCompressedBytes: TBytes;
-  CompressedDataSize: Integer;
 
-  CompressedIdx, UncompressedIdx: Integer;
-  RunLength: Integer;
-  PixelValue: Byte;
+  PixelX: Integer;
+  PixelY: Integer;
 
-  L_MinX, L_MinY, L_MaxX, L_MaxY: Integer;
-  L_BotX, L_BotY, L_BotAngle: Integer;
-  W_Buffer: Word;
-  S_Buffer: SmallInt;
-  B_Buffer: Byte;
-
-  CalculatedWidth: Integer;
-  CalculatedHeight: Integer;
-  GridIndex: Integer;
-
-  FizycznyPixelX, FizycznyPixelY: Integer;
-  ResztaSzerokosci: Integer;
+  ImageSize: Int64;
 begin
-  CompressedDataSize := SrcStream.Size;
+  if SrcStream = nil then
+    raise Exception.Create('ParseDreameMap: brak strumienia.');
+
   SrcStream.Position := 0;
 
-  if CompressedDataSize < 27 then Exit;
+  if SrcStream.Size < 27 then
+    raise Exception.Create(Format('Mapa ma tylko %d bajtów po ZLIB.', [SrcStream.Size]));
 
-  // ==========================================
-  // 1. ODCZYT NAGŁÓWKA GEOMETRII ŚWIATA
-  // ==========================================
-  SrcStream.ReadBuffer(W_Buffer, 2);
-  SrcStream.ReadBuffer(B_Buffer, 1);
-  SrcStream.ReadBuffer(B_Buffer, 1);
-  SrcStream.ReadBuffer(W_Buffer, 2);
+  { ---------------------------------------------------------
+    Dreame map header:
 
-  SrcStream.ReadBuffer(S_Buffer, 2); L_MinX := S_Buffer;
-  SrcStream.ReadBuffer(S_Buffer, 2); L_MinY := S_Buffer;
-  SrcStream.ReadBuffer(S_Buffer, 2); L_MaxX := S_Buffer;
-  SrcStream.ReadBuffer(S_Buffer, 2); L_MaxY := S_Buffer;
+       0..1   map_id
+       2..3   frame_id
+       4      frame_type
+       5..6   robot X
+       7..8   robot Y
+       9..10  robot angle
+       11..12 charger X
+       13..14 charger Y
+       15..16 charger angle
+       17..18 grid size
+       19..20 width
+       21..22 height
+       23..24 left
+       25..26 top
+    --------------------------------------------------------- }
 
-  SrcStream.Seek(2, TSeekOrigin.soCurrent);
-  SrcStream.ReadBuffer(S_Buffer, 2); L_BotX := S_Buffer;
-  SrcStream.ReadBuffer(S_Buffer, 2); L_BotY := S_Buffer;
-  SrcStream.ReadBuffer(S_Buffer, 2); L_BotAngle := S_Buffer;
+  if not ReadUInt16LE(SrcStream, MapId) then
+    raise Exception.Create('Błąd nagłówka mapy: map_id.');
 
-  SrcStream.Seek(27, TSeekOrigin.soBeginning);
+  if not ReadUInt16LE(SrcStream, FrameId) then
+    raise Exception.Create('Błąd nagłówka mapy: frame_id.');
 
-  // Wyliczamy surowe wymiary z nagłówka
-  CalculatedWidth  := (Abs(L_MaxY - L_MinY) div 50) + 1;
-  CalculatedHeight := (Abs(L_MaxX - L_MinX) div 50) + 1;
+  if SrcStream.Position >= SrcStream.Size then
+    raise Exception.Create('Błąd nagłówka mapy: frame_type.');
 
-  // =========================================================================
-  // POPRAWKA STRIDE ALIGNMENT:
-  // Zaokrąglamy szerokość klatki w górę do najbliższej wielokrotności liczby 16.
-  // Zapobiega to przesunięciu pikseli o 1-2 bajty przy przejściu do nowej linii Y,
-  // co ostatecznie scali te poziome kreski w gładkie kształty ścian pokoi!
-  // =========================================================================
-  ResztaSzerokosci := CalculatedWidth mod 16;
-  if ResztaSzerokosci > 0 then
-    CalculatedWidth := CalculatedWidth + (16 - ResztaSzerokosci);
+  SrcStream.ReadBuffer(FrameType, 1);
 
-  GridSizeInPixels := CalculatedWidth * CalculatedHeight;
+  if not ReadInt16LE(SrcStream, RobotX) then
+    raise Exception.Create('Błąd nagłówka mapy: robot X.');
 
-  Self.GridSize := 50;
-  Self.Left := L_MinX;
-  Self.Top := L_MinY;
-  Self.Robot_X := L_BotX;
-  Self.Robot_Y := L_BotY;
-  Self.Robot_A := L_BotAngle;
-  Self.Charger_X := L_BotX;
-  Self.Charger_Y := L_BotY;
-  Self.Width := CalculatedWidth;
-  Self.Height := CalculatedHeight;
+  if not ReadInt16LE(SrcStream, RobotY) then
+    raise Exception.Create('Błąd nagłówka mapy: robot Y.');
 
-  SetLength(RawCompressedBytes, CompressedDataSize - 27);
-  SrcStream.ReadBuffer(RawCompressedBytes, CompressedDataSize - 27);
+  if not ReadInt16LE(SrcStream, RobotA) then
+    raise Exception.Create('Błąd nagłówka mapy: robot angle.');
 
-  // ==========================================
-  // 2. ROZPAKOWANIE RLE DO WYRÓWNANEGO BUFORA
-  // ==========================================
-  SetLength(GridBuffer, GridSizeInPixels);
-  CompressedIdx := 0;
-  UncompressedIdx := 0;
+  if not ReadInt16LE(SrcStream, ChargerX) then
+    raise Exception.Create('Błąd nagłówka mapy: charger X.');
 
-  while (CompressedIdx < Length(RawCompressedBytes) - 1) and (UncompressedIdx < GridSizeInPixels) do
-  begin
-    RunLength := RawCompressedBytes[CompressedIdx];
-    if RunLength = 0 then
-    begin
-      if CompressedIdx + 2 >= Length(RawCompressedBytes) then Break;
-      RunLength := RawCompressedBytes[CompressedIdx + 1];
-      PixelValue := RawCompressedBytes[CompressedIdx + 2];
-      Inc(CompressedIdx, 3);
-    end
-    else
-    begin
-      PixelValue := RawCompressedBytes[CompressedIdx + 1];
-      Inc(CompressedIdx, 2);
-    end;
+  if not ReadInt16LE(SrcStream, ChargerY) then
+    raise Exception.Create('Błąd nagłówka mapy: charger Y.');
 
-    for I := 0 to RunLength - 1 do
-    begin
-      if UncompressedIdx >= GridSizeInPixels then Break;
-      GridBuffer[UncompressedIdx] := PixelValue;
-      Inc(UncompressedIdx);
-    end;
-  end;
+  if not ReadInt16LE(SrcStream, ChargerA) then
+    raise Exception.Create('Błąd nagłówka mapy: charger angle.');
 
-  // Inicjalizacja dwuwymiarowej matrycy logicznej
-  SetLength(FGlobalPixelMap, CalculatedHeight);
-  for Y := 0 to CalculatedHeight - 1 do
-    SetLength(FGlobalPixelMap[Y], CalculatedWidth);
+  if not ReadUInt16LE(SrcStream, GridSizeMm) then
+    raise Exception.Create('Błąd nagłówka mapy: grid size.');
+
+  if not ReadUInt16LE(SrcStream, MapWidth) then
+    raise Exception.Create('Błąd nagłówka mapy: width.');
+
+  if not ReadUInt16LE(SrcStream, MapHeight) then
+    raise Exception.Create('Błąd nagłówka mapy: height.');
+
+  if not ReadInt16LE(SrcStream, MapLeft) then
+    raise Exception.Create('Błąd nagłówka mapy: left.');
+
+  if not ReadInt16LE(SrcStream, MapTop) then
+    raise Exception.Create('Błąd nagłówka mapy: top.');
+
+  if MapWidth = 0 then
+    raise Exception.Create('Mapa ma szerokość 0.');
+
+  if MapHeight = 0 then
+    raise Exception.Create('Mapa ma wysokość 0.');
+
+  ImageSize := 27 + Int64(MapWidth) * Int64(MapHeight);
+
+  if ImageSize > SrcStream.Size then
+    raise Exception.Create(Format('Niepełna mapa. Header wymaga %d bajtów, otrzymano %d.', [ImageSize, SrcStream.Size]));
+
+  { ---------------------------------------------------------
+    Zapis danych nagłówka do pól formularza
+    --------------------------------------------------------- }
+
+  Header_MapId := MapId;
+  Header_FrameId := FrameId;
+  Header_FrameType := FrameType;
+
+  Robot_X := RobotX;
+  Robot_Y := RobotY;
+  Robot_A := RobotA;
+
+  Charger_X := ChargerX;
+  Charger_Y := ChargerY;
+  Charger_A := ChargerA;
+
+  GridSize := GridSizeMm;
+
+  if GridSize = 0 then GridSize := 50;
+
+  Width := MapWidth;
+  Height := MapHeight;
+
+  Left := MapLeft;
+  Top := MapTop;
+
+  FMapWidth := MapWidth;
+  FMapHeight := MapHeight;
+  FMapResolution := GridSize;
+
+  FOffsetX := MapLeft;
+  FOffsetY := MapTop;
+
+  FMapId := MapId;
+
+  G_MinX := MapLeft;
+  G_MinY := MapTop;
+  G_MaxX := MapLeft + (MapWidth * GridSize);
+
+  G_MaxY := MapTop + (MapHeight * GridSize);
+
+  SetLength(PixelData, Integer(MapWidth) * Integer(MapHeight));
+
+  SrcStream.Position := 27;
+
+  SrcStream.ReadBuffer(PixelData[0], Length(PixelData));
+
+  SetLength(FGlobalPixelMap, MapHeight);
+
+  for Y := 0 to MapHeight - 1 do
+    SetLength(FGlobalPixelMap[Y], MapWidth);
 
   DestBmp.PixelFormat := pf32bit;
-  DestBmp.SetSize(CalculatedWidth, CalculatedHeight);
 
-  // Czyszczenie tła
+  DestBmp.SetSize(MapWidth, MapHeight);
+
   DestBmp.Canvas.Brush.Color := RGB(32, 32, 32);
-  DestBmp.Canvas.FillRect(Rect(0, 0, CalculatedWidth, CalculatedHeight));
 
-  // ==========================================
-  // 3. RENDER SCANLINE Z WYRÓWNANĄ SZEROKOŚCIĄ LINII
-  // ==========================================
-  for Y := 0 to CalculatedHeight - 1 do
+  DestBmp.Canvas.FillRect(Rect(0, 0, MapWidth, MapHeight));
+
+  for Y := 0 to MapHeight - 1 do
   begin
-    RowPointer := DestBmp.ScanLine[Y];
-    for X := 0 to CalculatedWidth - 1 do
+    RowPointer := DestBmp.ScanLine[MapHeight - Y - 1];
+
+    for X := 0 to MapWidth - 1 do
     begin
-      GridIndex := (Y * CalculatedWidth) + X;
+      PixelIndex := (Y * MapWidth) + X;
+      Pixel := PixelData[PixelIndex];
+      FGlobalPixelMap[Y][X] := Pixel;
+      SegmentId := Pixel and $3F;
+      IsWall := (Pixel and $80) <> 0;
+      IsFloor := SegmentId > 0;
 
-      if (GridIndex >= 0) and (GridIndex < UncompressedIdx) then
-        CurrentByte := GridBuffer[GridIndex]
-      else
-        CurrentByte := 0;
-
-      FGlobalPixelMap[Y][X] := CurrentByte;
-
-      if CurrentByte = 0 then
+      { OUTSIDE }
+      if Pixel = 0 then
       begin
         RowPointer^.rgbRed := 32;
         RowPointer^.rgbGreen := 32;
         RowPointer^.rgbBlue := 32;
       end
+
+      { WALL / BORDER }
+      else if IsWall then
+      begin
+        RowPointer^.rgbRed := 125;
+        RowPointer^.rgbGreen := 125;
+        RowPointer^.rgbBlue := 125;
+      end
+
+      { FLOOR / ROOM }
+      else if IsFloor then
+      begin
+        if SegmentId = 63 then
+        begin
+          RowPointer^.rgbRed := 225;
+          RowPointer^.rgbGreen := 225;
+          RowPointer^.rgbBlue := 225;
+        end
+        else
+        begin
+          RowPointer^.rgbRed := 135 + ((SegmentId * 17) mod 45);
+          RowPointer^.rgbGreen := 175 + ((SegmentId * 11) mod 35);
+          RowPointer^.rgbBlue := 225 + ((SegmentId * 3) mod 25);
+        end;
+      end
+
       else
       begin
-        BitSegmentId := CurrentByte and $3F;
-        BitIsWall    := (CurrentByte and $40) <> 0;
-        BitIsFloor   := (CurrentByte and $80) <> 0;
-
-        if BitIsWall then
-        begin
-          RowPointer^.rgbRed := 140;
-          RowPointer^.rgbGreen := 140;
-          RowPointer^.rgbBlue := 140;
-        end
-        else if BitIsFloor then
-        begin
-          if BitSegmentId = $3F then
-          begin
-            RowPointer^.rgbRed := 174;
-            RowPointer^.rgbGreen := 202;
-            RowPointer^.rgbBlue := 247;
-          end
-          else
-          begin
-            RowPointer^.rgbRed := 150 + ((BitSegmentId * 15) mod 30);
-            RowPointer^.rgbGreen := 180 + ((BitSegmentId * 10) mod 25);
-            RowPointer^.rgbBlue := 245;
-          end;
-        end;
+        RowPointer^.rgbRed := 32;
+        RowPointer^.rgbGreen := 32;
+        RowPointer^.rgbBlue := 32;
       end;
+
       RowPointer^.rgbReserved := 255;
       Inc(RowPointer);
     end;
   end;
 
-  // Pozycja bota na mapie
-  FizycznyPixelX := (L_BotY - L_MinY) div 50;
-  FizycznyPixelY := (L_BotX - L_MinX) div 50;
+  PixelX := Round((RobotY - MapTop) / GridSize);
+  PixelY := MapHeight - Round((RobotX - MapLeft) / GridSize) - 1;
 
-  if (FizycznyPixelX >= 0) and (FizycznyPixelX < CalculatedWidth) and
-     (FizycznyPixelY >= 0) and (FizycznyPixelY < CalculatedHeight) then
+  if
+    (PixelX >= 0) and
+    (PixelX < MapWidth) and
+    (PixelY >= 0) and
+    (PixelY < MapHeight)
+  then
   begin
     DestBmp.Canvas.Brush.Color := clRed;
     DestBmp.Canvas.Pen.Color := clWhite;
     DestBmp.Canvas.Pen.Width := 1;
-    DestBmp.Canvas.Ellipse(FizycznyPixelX - 5, FizycznyPixelY - 5, FizycznyPixelX + 5, FizycznyPixelY + 5);
+
+    DestBmp.Canvas.Ellipse(
+      PixelX - 5,
+      PixelY - 5,
+      PixelX + 5,
+      PixelY + 5
+    );
   end;
 end;
-
 
 
   function ExtractObjectName(const JsonStr: string): string;
@@ -524,81 +619,141 @@ end;
       end;
     end;
 
-
 procedure TForm4.AutomatycznePobieranieMapy;
 var
-  LocalDid, LocalToken, LocalTenant, LocalUserAgent, LocalShard, TargetURL: string;
-  WybranyIndeks: Integer;
+  LocalDid: string;
+  LocalToken: string;
+  LocalTenant: string;
+  LocalUserAgent: string;
+  LocalShard: string;
+  TargetURL: string;
 begin
-  if Form1.FKeyToken.IsEmpty or Form1.FSelectedDid.IsEmpty or Form1.FTenantId.IsEmpty then
+  if Form1.FKeyToken.IsEmpty then
   begin
-    Form1.Memo1.Lines.Add(' ');
-    Form1.Memo1.Lines.Add('============');
-    Form1.Memo1.Lines.Add('Brak wymaganych danych!');
+    Form1.Memo1.Lines.Add('BŁĄD MAPY: brak FKeyToken.');
     Exit;
   end;
 
-  LocalToken := Form1.FKeyToken;
+  if Form1.FSelectedDid.IsEmpty then
+  begin
+    Form1.Memo1.Lines.Add('BŁĄD MAPY: brak DID.');
+    Exit;
+  end;
+
+  if Form1.FTenantId.IsEmpty then
+  begin
+    Form1.Memo1.Lines.Add('BŁĄD MAPY: brak TenantId.');
+    Exit;
+  end;
+
   LocalDid := Form1.FSelectedDid;
+  LocalToken := Form1.FKeyToken;
   LocalTenant := Form1.FTenantId;
   LocalUserAgent := Form1.USER_AGENT;
-  WybranyIndeks := ComboBox6.ItemIndex;
 
   LocalShard := Form1.FSelectedShard;
   if LocalShard.IsEmpty then LocalShard := '10000';
 
-  // Adres bramki chmurowej AIoT Shard 10000
-  TargetURL := Form1.GetBaseUrl(Form1.Combobox2.Text) + '/dreame-iot-com-' + LocalShard + '/device/sendCommand';
+  TargetURL := Form1.GetBaseUrl(Form1.ComboBox2.Text) +
+    '/dreame-iot-com-' + LocalShard + '/device/sendCommand';
 
-  Form1.Memo1.Lines.Add('============');
-  Form1.Memo1.Lines.Add('POBIERANIE MAPY, Shard:' + LocalShard);
+  Form1.Memo1.Lines.Add('===');
+  Form1.Memo1.Lines.Add('POBIERANIE AKTUALNEJ MAPY');
+  Form1.Memo1.Lines.Add('DID: ' + LocalDid);
+  Form1.Memo1.Lines.Add('Shard: ' + LocalShard);
 
-  System.Threading.TTask.Run(
-    procedure
-    var
+  TTask.Run(procedure var
       HTTP: TNetHTTPClient;
+      DownloadHTTP: TNetHTTPClient;
       Response: IHTTPResponse;
+
       RequestBody: TStringStream;
-      ReqObj, DataObj, FinalParamsObj, ParamObj: TJSONObject;
-      ParamsArr, ResultRespArr: TJSONArray;
-      RespJSON, DataRespObj, ExtractedJsonObj: TJSONObject;
-      RawCloudData: TMemoryStream;
-      Bmp: TBitmap;
-      PayloadStr, ResBody, InterimMapUrl: string;
-      StrefaString: string;
-      ParsowaneX1, ParsowaneY1, ParsowaneX2, ParsowaneY2: Integer;
-      FormatOk: Boolean;
-      WynikSplitRowne, Czesci: TArray<string>;
-      CiasnyValueString: string;
-      ItemVal: TJSONValue;
-      Idx: Integer;
+      ResponseBody: string;
 
-      ResolveReq: TStringStream;
-      ResolveResponseStream: TStringStream;
-      OstatecznyMapURL: string;
-      MapBramkaReq: TJSONObject;
-      MapBramkaStream: TStringStream;
-      MapBramkaRespStream: TStringStream;
-      MapBramkaJSON: TJSONObject;
+      ReqObj: TJSONObject;
+      DataObj: TJSONObject;
+      ParamsObj: TJSONObject;
 
-      // Strumienie i zmienne dla 3-etapowego dekodowania bufora chmury
-      Base64TextStream: TStringStream;
-      BinaryBytes: TBytes;
-      Base64DecodedStream: TMemoryStream;
+      ParamsArray: TJSONArray;
+      PropertiesArray: TJSONArray;
+
+      RespJSON: TJSONObject;
+      RespData: TJSONObject;
+      ResultArray: TJSONArray;
+
+      Item: TJSONObject;
+
+      ActiveMapId: Integer;
+
+      MapRequest: TJSONObject;
+      MapDataObj: TJSONObject;
+      MapParamsObj: TJSONObject;
+      MapParamsArray: TJSONArray;
+
+      MapResponse: string;
+      ObjectName: string;
+      MapKey: string;
+
+      DownloadReq: TJSONObject;
+      DownloadResponse: TStringStream;
+
+      DownloadURL: string;
+
+      RawDownload: TStringStream;
+
+      Base64Text: string;
+      Base64Bytes: TBytes;
+
+      EncryptedStream: TMemoryStream;
       DecryptedStream: TMemoryStream;
       DecompressedStream: TMemoryStream;
+
       ZStream: TZDecompressionStream;
-      MagicBytes: array[0..1] of Byte;
+
+      Bitmap: TBitmap;
+
+      I: Integer;
+
+  function PostJSON( const URL: string; const JSON: string): string;
+  var
+    Req: TStringStream;
+    RespStream: TStringStream;
+    Resp: IHTTPResponse;
+      begin
+        Result := '';
+
+        Req := TStringStream.Create(JSON, TEncoding.UTF8);
+        RespStream := TStringStream.Create('', TEncoding.UTF8);
+
+        try
+          Resp := HTTP.Post(URL, Req, RespStream);
+
+          if Assigned(Resp) then
+          begin
+            if Resp.StatusCode = 200 then
+              Result := RespStream.DataString;
+          end;
+
+        finally
+          Req.Free;
+          RespStream.Free;
+        end;
+      end;
+
     begin
-      HTTP := TNetHTTPClient.Create(nil);
-      RawCloudData := TMemoryStream.Create;
-      Bmp := TBitmap.Create;
-      InterimMapUrl := '';
-      ReqObj := nil;
+      HTTP := nil;
+      DownloadHTTP := nil;
+      RequestBody := nil;
+      RawDownload := nil;
+      EncryptedStream := nil;
+      DecryptedStream := nil;
+      DecompressedStream := nil;
+      Bitmap := nil;
 
       try
-        HTTP.ConnectionTimeout := 15000;
-        HTTP.ResponseTimeout := 15000;
+        HTTP := TNetHTTPClient.Create(nil);
+        HTTP.ConnectionTimeout := 20000;
+        HTTP.ResponseTimeout := 30000;
         HTTP.SecureProtocols := [THTTPSecureProtocol.TLS12, THTTPSecureProtocol.TLS13];
         HTTP.OnValidateServerCertificate := OminWalidacjeSSL;
 
@@ -608,282 +763,341 @@ begin
         HTTP.CustomHeaders['Dreame-Auth'] := 'bearer ' + LocalToken;
         HTTP.CustomHeaders['Tenant-Id'] := LocalTenant;
 
-        // Dynamiczne ID mapy z Twojego logu to 2
-        Self.FCurrentMapIdFromCloud := 2;
-
-        CiasnyValueString := Format('{"req_type":1,"frame_type":"I","force_type":1,"map_id":%d}', [Self.FCurrentMapIdFromCloud]);
-        CiasnyValueString := CiasnyValueString.Replace(' ', '');
-
-        FinalParamsObj := TJSONObject.Create;
-        FinalParamsObj.AddPair('piid', TJSONNumber.Create(2));
-        FinalParamsObj.AddPair('value', CiasnyValueString);
-
-        ParamsArr := TJSONArray.Create;
-        ParamsArr.AddElement(FinalParamsObj);
-
-        ParamObj := TJSONObject.Create;
-        ParamObj.AddPair('did', LocalDid);
-        ParamObj.AddPair('siid', TJSONNumber.Create(6));
-        ParamObj.AddPair('aiid', TJSONNumber.Create(1));
-        ParamObj.AddPair('in', ParamsArr);
-
-        DataObj := TJSONObject.Create;
-        DataObj.AddPair('did', LocalDid);
-        DataObj.AddPair('id', TJSONNumber.Create(4567));
-        DataObj.AddPair('method', 'action');
-        DataObj.AddPair('params', ParamObj);
+        ActiveMapId := -1;
 
         ReqObj := TJSONObject.Create;
-        ReqObj.AddPair('did', LocalDid);
-        ReqObj.AddPair('id', TJSONNumber.Create(4567));
-        ReqObj.AddPair('data', DataObj);
 
-        PayloadStr := ReqObj.ToJSON;
+        try
+          ReqObj.AddPair('did', LocalDid);
+          ReqObj.AddPair('id', TJSONNumber.Create(7001));
 
-        RequestBody := TStringStream.Create(PayloadStr, TEncoding.UTF8);
-        Response := HTTP.Post(TargetURL, RequestBody);
-        RequestBody.Free;
+          DataObj := TJSONObject.Create;
+          DataObj.AddPair('did', LocalDid);
+          DataObj.AddPair('id', TJSONNumber.Create(7001));
+          DataObj.AddPair('method', 'get_properties');
 
-        if Response <> nil then
-        begin
-          ResBody := Response.ContentAsString(TEncoding.UTF8);
+          PropertiesArray := TJSONArray.Create;
+          ParamsObj := TJSONObject.Create;
+          ParamsObj.AddPair('siid', TJSONNumber.Create(4));
+          ParamsObj.AddPair('piid', TJSONNumber.Create(1));
 
-          if Response.StatusCode = 200 then
+          PropertiesArray.AddElement(ParamsObj);
+          DataObj.AddPair('params', PropertiesArray);
+          DataObj.AddPair('From', 'app');
+
+          ReqObj.AddPair('data', DataObj);
+          ResponseBody := PostJSON(TargetURL, ReqObj.ToJSON);
+
+        finally
+          ReqObj.Free;
+        end;
+
+        if ResponseBody.IsEmpty then
+          raise Exception.Create('Nie otrzymano odpowiedzi get_properties.');
+
+        RespJSON := TJSONObject.ParseJSONValue(ResponseBody) as TJSONObject;
+
+        if not Assigned(RespJSON) then
+          raise Exception.Create('Nieprawidłowy JSON get_properties.');
+
+        try
+          RespData := RespJSON.GetValue('data') as TJSONObject;
+
+          if not Assigned(RespData) then
+            raise Exception.Create('Brak data w odpowiedzi get_properties.');
+
+          ResultArray := RespData.GetValue('result') as TJSONArray;
+
+          if not Assigned(ResultArray) then
+            raise Exception.Create('Brak result w get_properties.');
+
+          for I := 0 to ResultArray.Count - 1 do
           begin
-            RespJSON := TJSONObject.ParseJSONValue(ResBody) as TJSONObject;
-            if Assigned(RespJSON) then
-            try
-              if RespJSON.TryGetValue('data', DataRespObj) and Assigned(DataRespObj) then
+            Item := ResultArray.Items[I] as TJSONObject;
+
+            if not Assigned(Item) then Continue;
+
+            if
+              Item.GetValue<Integer>('piid') = 1 then
+            begin
+              if
+                Item.GetValue<Integer>('siid') = 4
+              then
               begin
-                if DataRespObj.TryGetValue('result', ExtractedJsonObj) and Assigned(ExtractedJsonObj) then
-                begin
-                  if ExtractedJsonObj.Get('out') <> nil then
-                  begin
-                    ResultRespArr := ExtractedJsonObj.Get('out').JsonValue as TJSONArray;
-
-                    if Assigned(ResultRespArr) then
-                    begin
-                      for Idx := 0 to ResultRespArr.Count - 1 do
-                      begin
-                        ItemVal := ResultRespArr.Items[Idx];
-                        if Assigned(ItemVal) and (ItemVal is TJSONObject) then
-                        begin
-                          if TJSONObject(ItemVal).GetValue<Integer>('piid') = 3 then
-                          begin
-                            ResBody := TJSONObject(ItemVal).GetValue<string>('value');
-
-                            ResolveReq := TStringStream.Create(
-                              Format(
-                                '{"did":"%s","id":4567,"data":{"did":"%s","id":4567,"method":"action","params":{"did":"%s","siid":6,"aiid":2,"in":[{"piid":1,"value":"{\"object_name\":\"%s\"}"}]},"From":"app"}}',
-                                [LocalDid, LocalDid, LocalDid, ResBody]
-                              ),
-                              TEncoding.UTF8
-                            );
-
-                            ResolveResponseStream := TStringStream.Create('', TEncoding.UTF8);
-                            try
-                              Response := HTTP.Post(TargetURL, ResolveReq, ResolveResponseStream);
-                            finally
-                              ResolveReq.Free;
-                              ResolveResponseStream.Free;
-                            end;
-
-                            OstatecznyMapURL := Form1.GetBaseUrl(Form1.Combobox2.Text) + '/dreame-user-iot/iotfile/getDownloadUrl';
-
-                            try
-                              MapBramkaReq := TJSONObject.Create;
-                              MapBramkaReq.AddPair('did', LocalDid);
-                              MapBramkaReq.AddPair('filename', ResBody);
-                              MapBramkaReq.AddPair('model', Form1.FSelectedModel);
-
-                              MapBramkaStream := TStringStream.Create(MapBramkaReq.ToJSON, TEncoding.UTF8);
-                              MapBramkaRespStream := TStringStream.Create('', TEncoding.UTF8);
-
-                              try
-                                Sleep(500);
-                                Response := HTTP.Post(OstatecznyMapURL, MapBramkaStream, MapBramkaRespStream);
-
-                                if Assigned(Response) and (Response.StatusCode = 200) then
-                                begin
-                                  MapBramkaJSON := TJSONObject.ParseJSONValue(MapBramkaRespStream.DataString) as TJSONObject;
-                                  try
-                                    if not MapBramkaJSON.TryGetValue<string>('data', InterimMapUrl) then
-                                      InterimMapUrl := '';
-                                  finally
-                                    MapBramkaJSON.Free;
-                                  end;
-                                end;
-                              finally
-                                MapBramkaStream.Free;
-                                MapBramkaRespStream.Free;
-                              end;
-                            finally
-                              MapBramkaReq.Free;
-                            end;
-
-                            if not InterimMapUrl.IsEmpty then Break;
-                          end;
-                        end;
-                      end;
-                    end;
-                  end;
-                end;
+                ActiveMapId := StrToIntDef(Item.GetValue<string>('value'), -1);
+                Break;
               end;
+            end;
+          end;
+
+        finally
+          RespJSON.Free;
+        end;
+
+        if ActiveMapId < 0 then
+          raise Exception.Create('Nie udało się pobrać aktywnego map_id.');
+
+        FCurrentMapIdFromCloud := ActiveMapId;
+        Form1.Memo1.Lines.Add('Aktualne map_id: ' + IntToStr(ActiveMapId));
+
+        MapRequest := TJSONObject.Create;
+
+        try
+          MapRequest.AddPair('req_type', TJSONNumber.Create(1));
+          MapRequest.AddPair('frame_type', 'I');
+          MapRequest.AddPair('force_type', TJSONNumber.Create(1));
+          MapRequest.AddPair('map_id', TJSONNumber.Create(ActiveMapId));
+          MapDataObj := TJSONObject.Create;
+          MapDataObj.AddPair('did', LocalDid);
+          MapDataObj.AddPair('id', TJSONNumber.Create(7101));
+          MapDataObj.AddPair('method', 'action');
+          MapParamsObj := TJSONObject.Create;
+          MapParamsObj.AddPair('did', LocalDid);
+          MapParamsObj.AddPair('siid', TJSONNumber.Create(6));
+          MapParamsObj.AddPair('aiid', TJSONNumber.Create(1));
+          MapParamsArray := TJSONArray.Create;
+
+          ParamsObj := TJSONObject.Create;
+          ParamsObj.AddPair('piid', TJSONNumber.Create(2));
+          ParamsObj.AddPair('value', MapRequest.ToJSON);
+
+          MapParamsArray.AddElement(ParamsObj);
+          MapParamsObj.AddPair('in', MapParamsArray);
+          MapDataObj.AddPair('params', MapParamsObj);
+
+          ReqObj := TJSONObject.Create;
+          ReqObj.AddPair('did', LocalDid);
+          ReqObj.AddPair('id', TJSONNumber.Create(7101));
+          ReqObj.AddPair('data', MapDataObj);
+
+          ResponseBody := PostJSON(TargetURL, ReqObj.ToJSON);
+
+          ReqObj.Free;
+          ReqObj := nil;
+
+        finally
+          MapRequest.Free;
+        end;
+
+        if ResponseBody.IsEmpty then
+          raise Exception.Create('Brak odpowiedzi map_request.');
+
+        RespJSON := TJSONObject.ParseJSONValue(ResponseBody) as TJSONObject;
+
+        if not Assigned(RespJSON) then
+          raise Exception.Create('Nieprawidłowy JSON map_request.');
+
+        try
+          RespData := RespJSON.GetValue('data') as TJSONObject;
+
+          if not Assigned(RespData) then
+            raise Exception.Create('Brak data w map_request.');
+
+          ResultArray := RespData.GetValue('result') as TJSONArray;
+
+          if not Assigned(ResultArray) then
+            raise Exception.Create('Brak result w map_request.');
+
+          ObjectName := '';
+
+          for I := 0 to ResultArray.Count - 1 do
+          begin
+            Item := ResultArray.Items[I] as TJSONObject;
+            if not Assigned(Item) then Continue;
+
+            if Item.GetValue<Integer>('piid') = 3 then
+            begin
+              ObjectName := Item.GetValue<string>('value');
+              Break;
+            end;
+          end;
+
+        finally
+          RespJSON.Free;
+        end;
+
+        if ObjectName.IsEmpty then
+          raise Exception.Create('Chmura nie zwróciła object_name mapy.');
+
+        Form1.Memo1.Lines.Add('object_name: ' + ObjectName);
+        MapKey := '';
+
+        I := ObjectName.IndexOf(',');
+
+        if I >= 0 then
+        begin
+          MapKey := Copy(ObjectName, I + 2, MaxInt);
+          ObjectName := Copy(ObjectName, 1, I);
+        end;
+
+        MapKey := Trim(MapKey);
+
+        if MapKey.IsEmpty then
+          raise Exception.Create('object_name nie zawiera klucza AES.');
+
+        Form1.Memo1.Lines.Add('Klucz mapy został wykryty.');
+
+        DownloadReq := TJSONObject.Create;
+
+        try
+          DownloadReq.AddPair('did', LocalDid);
+          DownloadReq.AddPair('filename', ObjectName);
+          DownloadReq.AddPair('model', Form1.FSelectedModel);
+          DownloadResponse :=TStringStream.Create('', TEncoding.UTF8);
+
+          try
+            Response := HTTP.Post(Form1.GetBaseUrl(Form1.ComboBox2.Text) +
+                '/dreame-user-iot/iotfile/getDownloadUrl',
+                TStringStream.Create(DownloadReq.ToJSON, TEncoding.UTF8), DownloadResponse);
+
+            if
+              (not Assigned(Response)) or (Response.StatusCode <> 200)
+            then
+              raise Exception.Create('getDownloadUrl HTTP ' + IntToStr(Response.StatusCode));
+
+            RespJSON := TJSONObject.ParseJSONValue(DownloadResponse.DataString) as TJSONObject;
+
+            try
+              if not Assigned(RespJSON) then
+                raise Exception.Create('Nieprawidłowa odpowiedź getDownloadUrl.');
+
+              if not RespJSON.TryGetValue<string>('data', DownloadURL) then DownloadURL := '';
+
             finally
               RespJSON.Free;
             end;
+
+          finally
+            DownloadResponse.Free;
           end;
+
+        finally
+          DownloadReq.Free;
         end;
 
-        // POTOK DEKODOWANIA I DESZYFRACJI PRZED RENDEREM SIATKI
+        if DownloadURL.IsEmpty then
+          raise Exception.Create('getDownloadUrl nie zwrócił URL.');
 
-        if not InterimMapUrl.IsEmpty then
-        begin
-          HTTP.CustHeaders.Clear;
-          HTTP.CustomHeaders['User-Agent'] := LocalUserAgent;
+        Form1.Memo1.Lines.Add('URL mapy otrzymany.');
 
-          Response := HTTP.Get(InterimMapUrl, RawCloudData);
+        RawDownload := TStringStream.Create('', TEncoding.ASCII);
+        DownloadHTTP := TNetHTTPClient.Create(nil);
 
-          if (Response <> nil) and (Response.StatusCode = 200) then
+        try
+          DownloadHTTP.ConnectionTimeout := 30000;
+          DownloadHTTP.ResponseTimeout := 60000;
+          DownloadHTTP.SecureProtocols := [THTTPSecureProtocol.TLS12, THTTPSecureProtocol.TLS13];
+          DownloadHTTP.OnValidateServerCertificate := OminWalidacjeSSL;
+          DownloadHTTP.UserAgent := LocalUserAgent;
+
+          Response := DownloadHTTP.Get(DownloadURL, RawDownload);
+
+          if not Assigned(Response) then
+            raise Exception.Create('Pobranie mapy: brak odpowiedzi HTTP.');
+
+          if Response.StatusCode <> 200 then
+            raise Exception.Create('Pobranie mapy HTTP ' + IntToStr(Response.StatusCode));
+
+          Base64Text := Trim(RawDownload.DataString);
+
+        finally
+          RawDownload.Free;
+          DownloadHTTP.Free;
+          DownloadHTTP := nil;
+        end;
+
+        Base64Text := Base64Text
+            .Replace('-', '+')
+            .Replace('_', '/')
+            .Replace(#13, '')
+            .Replace(#10, '')
+            .Replace(' ', '')
+            .Trim;
+
+        while
+          (Length(Base64Text) mod 4) <> 0
+        do
+          Base64Text := Base64Text + '=';
+
+        Base64Bytes := TNetEncoding.Base64.Decode(TEncoding.ASCII.GetBytes(Base64Text));
+
+        if Length(Base64Bytes) = 0 then
+          raise Exception.Create('Base64 mapy jest pusty.');
+
+        EncryptedStream := TMemoryStream.Create;
+        EncryptedStream.WriteBuffer(Base64Bytes[0], Length(Base64Bytes));
+        EncryptedStream.Position := 0;
+
+        DecryptedStream := TMemoryStream.Create;
+
+        DecryptDreameMapAes(EncryptedStream, DecryptedStream, MapKey);
+
+        if DecryptedStream.Size = 0 then
+          raise Exception.Create('AES zwrócił pustą mapę.');
+
+        DecompressedStream := TMemoryStream.Create;
+        DecryptedStream.Position := 0;
+
+        ZStream := TZDecompressionStream.Create(DecryptedStream);
+
+        try
+          DecompressedStream.CopyFrom(ZStream, 0);
+        finally
+          ZStream.Free;
+        end;
+
+        if DecompressedStream.Size < 27 then
+          raise Exception.Create(Format('Po ZLIB otrzymano tylko %d bajtów.', [DecompressedStream.Size]));
+
+        DecompressedStream.Position := 0;
+        Form1.Memo1.Lines.Add('Mapa odszyfrowana i rozpakowana: ' + IntToStr(DecompressedStream.Size) + ' B');
+
+        Bitmap := TBitmap.Create;
+        ParseDreameMap(DecompressedStream, Bitmap);
+
+        if
+          (Bitmap.Width = 0) or (Bitmap.Height = 0)
+        then
+          raise Exception.Create('Renderer utworzył pustą bitmapę.');
+
+        TThread.Synchronize(nil,
+          procedure
           begin
-            RawCloudData.Position := 0;
-
-            Base64TextStream := TStringStream.Create('', TEncoding.ASCII);
-            Base64DecodedStream := TMemoryStream.Create;
-            DecryptedStream := TMemoryStream.Create;
-            DecompressedStream := TMemoryStream.Create;
-            try
-              // 1. Odkodowanie tekstu Base64 z chmury do czystych bajtów
-              Base64TextStream.CopyFrom(RawCloudData, 0);
-              try
-                BinaryBytes := TNetEncoding.Base64URL.Decode(TEncoding.ASCII.GetBytes(Trim(Base64TextStream.DataString)));
-              except
-                BinaryBytes := TNetEncoding.Base64.Decode(TEncoding.ASCII.GetBytes(Trim(Base64TextStream.DataString)));
-              end;
-
-              if Length(BinaryBytes) > 27 then
-              begin
-                Base64DecodedStream.WriteBuffer(BinaryBytes[0], Length(BinaryBytes));
-                Base64DecodedStream.Position := 0;
-
-                // 2. Deszyfracja kluczem sesyjnym AES-256 z WinAPI
-                Self.DecryptDreameAes(Base64DecodedStream, DecryptedStream, LocalToken);
-                DecryptedStream.Position := 0;
-
-                // 3. Rozpakowanie dekompresorem ZLIB ($78 $9C)
-                if DecryptedStream.Size > 2 then
-                begin
-                  DecryptedStream.ReadBuffer(MagicBytes, 2);
-                  DecryptedStream.Position := 0;
-
-                   if (MagicBytes[0] = $78) then
-                  begin
-                    ZStream := TZDecompressionStream.Create(DecryptedStream);
-                    try
-                      DecompressedStream.CopyFrom(ZStream, 0);
-                    finally
-                      ZStream.Free;
-                    end;
-                  end
-                  else
-                  begin
-                    DecompressedStream.CopyFrom(DecryptedStream, 0);
-                  end;
-                end
-                else
-                begin
-                  DecompressedStream.CopyFrom(DecryptedStream, 0);
-                end;
-
-                DecompressedStream.Position := 0;
-                DecompressedStream.SaveToFile(ExtractFilePath(ParamStr(0)) + 'mapa');
-
-
-                // 4. Wywołanie zaktualizowanego parsera siatki z offsetem Origin
-                 ParseDreameMap(DecompressedStream, Bmp);
-
-                DiagnozaStrumieniaAIoT(DecompressedStream);
-
-              end;
-
-            finally
-              DecompressedStream.Free;
-              DecryptedStream.Free;
-              Base64DecodedStream.Free;
-              Base64TextStream.Free;
-            end;
-
-            // NAKŁADANIE DANYCH SELEKCJI Z COMBOBOX6
-            if WybranyIndeks > -1 then
-            begin
-              FormatOk := False;
-              ParsowaneX1 := 0; ParsowaneY1 := 0; ParsowaneX2 := 0; ParsowaneY2 := 0;
-
-              TThread.Synchronize(nil, procedure
-              begin
-                StrefaString := ComboBox6.Items[WybranyIndeks];
-              end);
-
-              if StrefaString.Contains('=') then
-              begin
-                WynikSplitRowne := StrefaString.Split(['=']);
-                if Length(WynikSplitRowne) >= 2 then
-                begin
-                  Czesci := WynikSplitRowne[1].Split([',']);
-                  if Length(Czesci) >= 4 then
-                  begin
-                    FormatOk := TryStrToInt(Czesci[0], ParsowaneX1) and
-                                TryStrToInt(Czesci[1], ParsowaneY1) and
-                                TryStrToInt(Czesci[2], ParsowaneX2) and
-                                TryStrToInt(Czesci[3], ParsowaneY2);
-                  end;
-                end;
-              end;
-
-              if FormatOk then
-              begin
-                Bmp.Canvas.Lock;
-                try
-                  Bmp.Canvas.Brush.Style := bsClear;
-                  Bmp.Canvas.Pen.Color := clRed; Bmp.Canvas.Pen.Width := 3;
-                  Bmp.Canvas.Rectangle(ParsowaneX1, ParsowaneY1, ParsowaneX2, ParsowaneY2);
-
-                  finally
-                  Bmp.Canvas.Unlock;
-                end;
-              end;
-            end;
-
-            TThread.Synchronize(nil, procedure
-            begin
-              if Assigned(FBufferBitmap) then FBufferBitmap.Free;
+            if Assigned(FBufferBitmap) then
+              FBufferBitmap.Free;
               FBufferBitmap := TBitmap.Create;
-              FBufferBitmap.Assign(Bmp);
+              FBufferBitmap.Assign(Bitmap);
 
-              InvalidatePaintBox;
-              Self.Repaint;
+            PaintBox1.Invalidate;
+            PaintBox1.Repaint;
 
-              Form1.Memo1.Lines.Add('=Mapa jest na ekranie=');
-
-            end);
-          end;
-        end;
+            Form1.Memo1.Lines.Add('===');
+            Form1.Memo1.Lines.Add('MAPA WYSWIETLONA PRAWIDLOWO');
+            Form1.Memo1.Lines.Add(Format('Rozmiar: %d x %d', [Bitmap.Width, Bitmap.Height]));
+            Form1.Memo1.Lines.Add('===');
+          end
+        );
 
       except
         on E: Exception do
-          TThread.Synchronize(nil, procedure
-          begin
-            Form1.Memo1.Lines.Add('Wyjątek w potoku: ' + E.Message);
-          end);
+        begin
+          TThread.Synchronize(nil,
+            procedure
+            begin
+              Form1.Memo1.Lines.Add('BŁĄD MAPY: ' + E.Message);
+            end
+          );
+        end;
       end;
 
-      if Assigned(ReqObj) then ReqObj.Free;
-        HTTP.Free;
-        RawCloudData.Free;
-        Bmp.Free;
-    end);
+      Bitmap.Free;
+      EncryptedStream.Free;
+      DecryptedStream.Free;
+      DecompressedStream.Free;
+      HTTP.Free;
+    end
+  );
 end;
-
 
 // --------- Rysowanie mapy ---------
 procedure TForm4.PaintBox1Paint(Sender: TObject);
@@ -1084,112 +1298,181 @@ function CryptReleaseContext(hProv: THandle; dwFlags: DWORD): LongBool; stdcall;
 //
 // -----------------------------------------------------------------------
 
-procedure TForm4.DecryptDreameAes(ASrcStream, ADestStream: TStream; const AToken: string);
-var
-  KeyHash: TBytes;
-  IV: array[0..15] of Byte;
-  EncryptedData: TBytes;
-  DecryptedData: TBytes;
-  PaddingLen: Byte;
-  ActualDecLen: Integer;
+const
+  DREAME_MAP_AES_IV = 'aebf8c52e26a4767';
 
-  Provider: THandle;
-  KeyHandle: THandle;
-  BlockLen, DataLen: DWORD;
-  KeyParam: record
-    Header: record
-      bType: Byte;
-      bVersion: Byte;
-      reserved: Word;
-      aiKeyAlg: Cardinal;
-    end;
+procedure TForm4.DecryptDreameMapAes(
+  ASrcStream, ADestStream: TStream;
+  const AMapKey: string
+);
+const
+  PROV_RSA_AES = 24;
+  CRYPT_VERIFYCONTEXT = $F0000000;
+  PLAINTEXTKEYBLOB = $08;
+  CALG_AES_256 = $00006610;
+  KP_MODE = 4;
+  CRYPT_MODE_CBC = 1;
+  KP_IV = 1;
+  ADVAPI32_DLL = 'advapi32.dll';
+
+type
+  TKeyBlobHeader = packed record
+    bType: Byte;
+    bVersion: Byte;
+    reserved: Word;
+    aiKeyAlg: Cardinal;
+  end;
+
+  TKeyBlob = packed record
+    Header: TKeyBlobHeader;
     KeyLen: Cardinal;
     KeyBytes: array[0..31] of Byte;
   end;
+
+var
+  Provider: THandle;
+  KeyHandle: THandle;
+  HashString: string;
+  KeyBytes: TBytes;
+  EncryptedData: TBytes;
+  DecryptedData: TBytes;
+  IV: array[0..15] of Byte;
+  KeyBlob: TKeyBlob;
+  Mode: DWORD;
+  DataLen: DWORD;
+  I: Integer;
 begin
-  if (ASrcStream.Size < 32) or (AToken.IsEmpty) then
-  begin
-    ASrcStream.Position := 0;
-    ADestStream.CopyFrom(ASrcStream, 0);
-    Exit;
-  end;
+  ADestStream.Size := 0;
+  ADestStream.Position := 0;
+
+  if (ASrcStream = nil) or
+     (ASrcStream.Size = 0) or
+     AMapKey.IsEmpty then
+    raise Exception.Create('Brak danych lub klucza AES mapy.');
 
   ASrcStream.Position := 0;
 
-  // POPRAWIONE: Prawidłowe sprawdzenie indeksów tablicy bajt po bajcie
-  ASrcStream.ReadBuffer(IV[0], 6);
-  if ((IV[0] = $78) and ((IV[1] = $9C) or (IV[1] = $DA) or (IV[1] = $01) or (IV[1] = $5E))) or
-     ((IV[0] = Ord('D')) and (IV[1] = Ord('R')) and (IV[2] = Ord('E')) and (IV[3] = Ord('A')) and (IV[4] = Ord('M')) and (IV[5] = Ord('E'))) then
-  begin
-    ASrcStream.Position := 0;
-    ADestStream.CopyFrom(ASrcStream, 0);
-    Exit;
-  end;
+  SetLength(EncryptedData, ASrcStream.Size);
+  ASrcStream.ReadBuffer(
+    EncryptedData[0],
+    Length(EncryptedData)
+  );
 
-  // Przywracamy pozycję i pobieramy pełne IV oraz dane dla starych szyfrowanych klatek
-  ASrcStream.Position := 0;
-  ASrcStream.ReadBuffer(IV[0], 16);
+  if (Length(EncryptedData) = 0) then
+    raise Exception.Create('Pusty bufor szyfrowanej mapy.');
 
-  SetLength(EncryptedData, ASrcStream.Size - 16);
-  ASrcStream.ReadBuffer(EncryptedData[0], Length(EncryptedData));
+  if (Length(EncryptedData) mod 16 <> 0) then
+    raise Exception.Create(
+      Format(
+        'Nieprawidłowa długość AES: %d bajtów.',
+        [Length(EncryptedData)]
+      )
+    );
 
-  if not CryptAcquireContext(Provider, nil, nil, 24, $F0000000) then
-  begin
-    ADestStream.WriteBuffer(EncryptedData[0], Length(EncryptedData));
-    Exit;
-  end;
+  HashString :=
+    THashSHA2.GetHashString(AMapKey, SHA256).ToLower;
+
+  if Length(HashString) < 32 then
+    raise Exception.Create('Nie udało się utworzyć klucza SHA256.');
+
+  HashString := Copy(HashString, 1, 32);
+  KeyBytes := TEncoding.ASCII.GetBytes(HashString);
+
+  if Length(KeyBytes) <> 32 then
+    raise Exception.Create('Klucz AES nie ma 32 bajtów.');
+
+  FillChar(IV, SizeOf(IV), 0);
+
+  for I := 0 to Length(DREAME_MAP_AES_IV) - 1 do
+    IV[I] := Ord(DREAME_MAP_AES_IV[I + 1]);
+
+  FillChar(KeyBlob, SizeOf(KeyBlob), 0);
+
+  KeyBlob.Header.bType := PLAINTEXTKEYBLOB;
+  KeyBlob.Header.bVersion := 2;
+  KeyBlob.Header.reserved := 0;
+  KeyBlob.Header.aiKeyAlg := CALG_AES_256;
+  KeyBlob.KeyLen := 32;
+
+  Move(
+    KeyBytes[0],
+    KeyBlob.KeyBytes[0],
+    32
+  );
+
+  if not CryptAcquireContext(
+    Provider,
+    nil,
+    nil,
+    PROV_RSA_AES,
+    CRYPT_VERIFYCONTEXT
+  ) then
+    RaiseLastOSError;
 
   try
-    KeyHash := THashSHA2.GetHashBytes(AToken, SHA256);
-
-    KeyParam.Header.bType := $08;
-    KeyParam.Header.bVersion := $02;
-    KeyParam.Header.reserved := 0;
-    KeyParam.Header.aiKeyAlg := $00006610;
-    KeyParam.KeyLen := 32;
-    Move(KeyHash[0], KeyParam.KeyBytes[0], 32);
-
-    if not CryptImportKey(Provider, @KeyParam, SizeOf(KeyParam), 0, 0, KeyHandle) then
-      Exit;
+    if not CryptImportKey(
+      Provider,
+      @KeyBlob,
+      SizeOf(KeyBlob),
+      0,
+      0,
+      KeyHandle
+    ) then
+      RaiseLastOSError;
 
     try
-      BlockLen := 1;
-      CryptSetKeyParam(KeyHandle, 4, @BlockLen, 0);
-      CryptSetKeyParam(KeyHandle, 1, @IV[0], 0);
+      Mode := CRYPT_MODE_CBC;
+
+      if not CryptSetKeyParam(
+        KeyHandle,
+        KP_MODE,
+        @Mode,
+        0
+      ) then
+        RaiseLastOSError;
+
+      if not CryptSetKeyParam(
+        KeyHandle,
+        KP_IV,
+        @IV[0],
+        0
+      ) then
+        RaiseLastOSError;
 
       DecryptedData := Copy(EncryptedData);
+
       DataLen := Length(DecryptedData);
 
-      if CryptDecrypt(KeyHandle, 0, True, 0, @DecryptedData[0], DataLen) then
-      begin
-        if DataLen > 0 then
-        begin
-          PaddingLen := DecryptedData[DataLen - 1];
-          if PaddingLen <= 16 then
-          begin
-            ActualDecLen := DataLen - PaddingLen;
-            if ActualDecLen > 0 then
-              ADestStream.WriteBuffer(DecryptedData[0], ActualDecLen)
-            else
-              ADestStream.WriteBuffer(DecryptedData[0], DataLen);
-          end
-          else
-            ADestStream.WriteBuffer(DecryptedData[0], DataLen);
-        end;
-      end
-      else
-      begin
-        ADestStream.WriteBuffer(EncryptedData[0], Length(EncryptedData));
-      end;
+      if not CryptDecrypt(
+        KeyHandle,
+        0,
+        True,
+        0,
+        @DecryptedData[0],
+        DataLen
+      ) then
+        RaiseLastOSError;
+
+      if DataLen = 0 then
+        raise Exception.Create(
+          'AES zwrócił pusty bufor.'
+        );
+
+      ADestStream.WriteBuffer(
+        DecryptedData[0],
+        DataLen
+      );
+
+      ADestStream.Position := 0;
 
     finally
       CryptDestroyKey(KeyHandle);
     end;
+
   finally
     CryptReleaseContext(Provider, 0);
   end;
 end;
-
 
 procedure TForm4.DaneRobota;
 var
@@ -1223,6 +1506,7 @@ begin
       Idx, V_Piid: Integer;
       V_Value: string;
       ItemVal: TJSONValue;
+      ActiveMapId: Integer;
     begin
       HTTP := TNetHTTPClient.Create(nil);
       try
@@ -1296,9 +1580,10 @@ begin
                       begin
                         case V_Piid of
                            1: begin
-                                 Form1.Memo1.Lines.Add('ID Aktywnej Mapy: ' + V_Value);
-                                 ComboBox4.Text := 'Mapa ID: ' + V_Value; // Przypisanie bezpośrednie
-                               end;
+                              ActiveMapId := StrToIntDef(V_Value, -1);
+                              Form1.Memo1.Lines.Add('ID Aktywnej Mapy: ' + IntToStr(ActiveMapId));
+                              ComboBox4.Text :='Mapa ID: ' + IntToStr(ActiveMapId);
+                            end;
                           5: Form1.Memo1.Lines.Add('Ilość map w urządzeniu: ' + V_Value);
                           7: Form1.Memo1.Lines.Add('Pozycja robota: ' + V_Value);
                           27: Form1.Memo1.Lines.Add('Zużycie filtra powietrza: ' + V_Value + '%');
@@ -1319,7 +1604,8 @@ begin
 
         // CZĘŚĆ 2: Wymuszenie na obiekcie wykonawczym nazwy pliku mapy (SIID: 6)
 
-        CiasnyValueString := '{"req_type":1,"frame_type":"I","force_type":1,"map_id":14}'; // Odpytujemy z automatu aktywną mapę 14
+        //CiasnyValueString := '{"req_type":1,"frame_type":"I","force_type":1,"map_id":14}'; // Odpytujemy z automatu aktywną mapę 14
+        CiasnyValueString := Format('{"req_type":1,"frame_type":"I","force_type":1,"map_id":%d}', [ActiveMapId]);
 
         FinalParamsObj := TJSONObject.Create;
         FinalParamsObj.AddPair('piid', TJSONNumber.Create(2));
